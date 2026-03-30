@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""anvil-build — automated build loop.
+
+Parses tasks from .anvil/plan.md, feeds each to aider via its Python API.
+Aider's --lint-cmd triggers Claude review automatically after each edit.
+
+Run from within aider: /run anvil-build
+Or standalone: anvil-build
+"""
+
+import os
+import re
+import sys
+
+
+def parse_tasks(plan_path):
+    """Extract tasks from the plan markdown."""
+    with open(plan_path) as f:
+        content = f.read()
+
+    tasks = []
+    # Split on ### Task N: Title
+    parts = re.split(r'### Task \d+:\s*', content)
+    titles = re.findall(r'### Task \d+:\s*(.+)', content)
+
+    for i, (title, body) in enumerate(zip(titles, parts[1:]), 1):
+        tasks.append({
+            "id": i,
+            "title": title.strip(),
+            "description": f"Task {i}: {title.strip()}\n\n{body.strip()}",
+        })
+    return tasks
+
+
+def build_with_aider_api(tasks):
+    """Drive aider programmatically via its Python API."""
+    try:
+        from aider.coders import Coder
+        from aider.models import Model
+        from aider.io import InputOutput
+    except ImportError:
+        print("Error: aider not installed. Run: pip install aider-chat")
+        sys.exit(1)
+
+    # Load config from env / anvil.env
+    anvil_env = os.path.expanduser("~/.anvil.env")
+    env = {}
+    if os.path.exists(anvil_env):
+        with open(anvil_env) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+
+    max_retries = int(env.get("ANVIL_MAX_RETRIES", "2"))
+
+    io = InputOutput(yes=True)
+    model_name = os.environ.get("AIDER_MODEL", "openai/Qwen3-Coder-Next")
+    model = Model(model_name)
+
+    # Discover files in the repo
+    import glob
+    fnames = []
+    for ext in ["*.py", "*.js", "*.ts", "*.jsx", "*.tsx", "*.go", "*.rs"]:
+        fnames.extend(glob.glob(f"**/{ext}", recursive=True))
+
+    coder = Coder.create(
+        main_model=model,
+        io=io,
+        fnames=fnames[:20],  # limit to avoid overwhelming context
+        auto_lint=True,
+        lint_cmds={"python": "anvil-review"},
+    )
+
+    total = len(tasks)
+    accepted = 0
+    failed = 0
+
+    for task in tasks:
+        print(f"\n{'='*60}")
+        print(f"[Task {task['id']}/{total}] {task['title']}")
+        print(f"{'='*60}\n")
+
+        try:
+            coder.run(task["description"])
+            accepted += 1
+            print(f"\n✓ Task {task['id']} complete")
+        except Exception as e:
+            print(f"\n✗ Task {task['id']} failed: {e}")
+            failed += 1
+
+    print(f"\n{'='*60}")
+    print(f"Build complete: {accepted} accepted, {failed} failed out of {total}")
+    print(f"{'='*60}")
+
+
+def build_with_message_file(tasks):
+    """Fallback: drive aider via --message-file for each task."""
+    import subprocess
+    import tempfile
+
+    total = len(tasks)
+    accepted = 0
+    failed = 0
+
+    for task in tasks:
+        print(f"\n{'='*60}")
+        print(f"[Task {task['id']}/{total}] {task['title']}")
+        print(f"{'='*60}\n")
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write(task["description"])
+            msg_file = f.name
+
+        try:
+            result = subprocess.run(
+                ["aider", "--message-file", msg_file, "--yes", "--no-analytics"],
+                timeout=600,
+            )
+            if result.returncode == 0:
+                accepted += 1
+                print(f"\n✓ Task {task['id']} complete")
+            else:
+                failed += 1
+                print(f"\n✗ Task {task['id']} exited with code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            failed += 1
+            print(f"\n✗ Task {task['id']} timed out after 600s")
+        finally:
+            os.unlink(msg_file)
+
+    print(f"\n{'='*60}")
+    print(f"Build complete: {accepted} accepted, {failed} failed out of {total}")
+    print(f"{'='*60}")
+
+
+def main():
+    plan_path = ".anvil/plan.md"
+    if not os.path.exists(plan_path):
+        print("No plan found at .anvil/plan.md")
+        print("Run anvil-plan first.")
+        sys.exit(1)
+
+    tasks = parse_tasks(plan_path)
+    if not tasks:
+        print("No tasks found in plan. Check .anvil/plan.md format.")
+        print("Expected: ### Task N: Title")
+        sys.exit(1)
+
+    print(f"Anvil Build — {len(tasks)} tasks from plan")
+    print(f"Coder: aider + local LLM")
+    print(f"Reviewer: anvil-review (auto after each edit)")
+    print()
+
+    for t in tasks:
+        print(f"  {t['id']}. {t['title']}")
+
+    print()
+    confirm = input("Start building? [Y/n] ").strip().lower()
+    if confirm and confirm != "y":
+        print("Aborted.")
+        sys.exit(0)
+
+    # Try Python API first, fall back to message-file
+    try:
+        from aider.coders import Coder
+        build_with_aider_api(tasks)
+    except ImportError:
+        print("Aider Python API not available, using --message-file fallback")
+        build_with_message_file(tasks)
+
+
+if __name__ == "__main__":
+    main()
