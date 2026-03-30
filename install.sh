@@ -164,6 +164,12 @@ for script in anvil anvil-review anvil-review-api anvil-review-local anvil-plan 
     fi
 done
 
+# Short aliases for /run inside aider
+for cmd in plan build help plan-answers; do
+    ln -sf "anvil-${cmd}" "${BIN_DIR}/${cmd}"
+done
+echo "  ✓ short commands (plan, build, help)"
+
 # ── Write configs ───────────────────────────────────
 echo ""
 
