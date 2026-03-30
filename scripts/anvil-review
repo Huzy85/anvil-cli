@@ -26,6 +26,11 @@ if [ "$DIFF_LEN" -gt "$MAX_DIFF_CHARS" ]; then
 [diff truncated — ${DIFF_LEN} chars total, showing first ${MAX_DIFF_CHARS}]"
 fi
 
+echo ""
+echo "  ── Claude Review ──────────────────────────"
+echo "  Files: $FILES"
+echo "  Reviewing..."
+
 PROMPT="Review this code change. Be concise. Focus on bugs, logic errors, and security issues. Ignore style.
 If the code is correct and complete: say APPROVED on its own line.
 If there are issues: say REJECTED on its own line, then list what needs fixing.
@@ -43,6 +48,17 @@ else
     RESULT=$($REVIEWER $FILES 2>&1)
 fi
 
-echo "$RESULT"
-
-echo "$RESULT" | grep -qi "APPROVED" && exit 0 || exit 1
+if echo "$RESULT" | grep -qi "APPROVED"; then
+    echo "  APPROVED"
+    echo "  ────────────────────────────────────────────"
+    echo ""
+    exit 0
+else
+    echo "  REJECTED"
+    echo ""
+    echo "$RESULT"
+    echo ""
+    echo "  ────────────────────────────────────────────"
+    echo ""
+    exit 1
+fi
