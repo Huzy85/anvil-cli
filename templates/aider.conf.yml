@@ -7,7 +7,10 @@ openai-api-base: __API_BASE__
 openai-api-key: __API_KEY__
 
 auto-lint: true
-lint-cmd: anvil-review
+lint-cmd:
+  - "python: anvil-review"
+  - "javascript: anvil-review"
+  - "typescript: anvil-review"
 
 no-analytics: true
 no-show-model-warnings: true

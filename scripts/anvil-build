@@ -125,7 +125,9 @@ def build_with_message_file(tasks):
                     "--no-check-update",
                     "--no-browser",
                     "--auto-lint",
-                    "--lint-cmd", "anvil-review",
+                    "--lint-cmd", "python: anvil-review",
+                    "--lint-cmd", "javascript: anvil-review",
+                    "--lint-cmd", "typescript: anvil-review",
                 ],
                 timeout=600,
             )
