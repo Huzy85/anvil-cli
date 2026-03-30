@@ -11,14 +11,48 @@ ANVIL_ENV="${HOME}/.anvil.env"
 # Prevent OpenBLAS thread explosion on machines running llama.cpp
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 
-# Show banner unless --message or --yes flags suggest non-interactive use
+# Subcommands — used from inside aider as /run anvil <cmd>
+case "${1:-}" in
+    help)
+        echo ""
+        echo "  Anvil Commands"
+        echo "  ─────────────────────────────────────────"
+        echo ""
+        echo "  Just type and chat — your LLM codes, reviewer checks each edit."
+        echo ""
+        echo "  /run anvil plan           Send conversation to Claude for a task plan"
+        echo "  /run anvil plan-answers   Answer Claude's planning questions"
+        echo "  /run anvil build          Auto-feed plan tasks one by one"
+        echo "  /run anvil help           This help message"
+        echo ""
+        echo "  Config files:"
+        echo "    ~/.aider.conf.yml       Model and endpoint settings"
+        echo "    ~/.anvil.env            Reviewer settings"
+        echo ""
+        exit 0
+        ;;
+    plan)
+        shift
+        exec anvil-plan "$@"
+        ;;
+    plan-answers)
+        shift
+        exec anvil-plan-answers "$@"
+        ;;
+    build)
+        shift
+        exec anvil-build "$@"
+        ;;
+esac
+
+# No subcommand — launch aider
 if [[ "$*" != *"--message"* ]] && [[ "$*" != *"--message-file"* ]]; then
     echo ""
     echo "  Anvil — Local LLM codes. Claude reviews."
     echo "  ─────────────────────────────────────────"
-    echo "  /run anvil-plan     Claude plans your idea"
-    echo "  /run anvil-build    Auto-build from plan"
-    echo "  /run anvil-help     All commands"
+    echo "  /run anvil plan      Claude plans your idea"
+    echo "  /run anvil build     Auto-build from plan"
+    echo "  /run anvil help      All commands"
     echo ""
 fi
 
