@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# anvil — launch aider with local LLM + Claude Code review
+# https://github.com/steamvibe/anvil-cli
+
+set -euo pipefail
+
+# Load config if exists
+ANVIL_ENV="${HOME}/.anvil.env"
+[ -f "$ANVIL_ENV" ] && source "$ANVIL_ENV"
+
+# Prevent OpenBLAS thread explosion on machines running llama.cpp
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+
+exec aider "$@"
