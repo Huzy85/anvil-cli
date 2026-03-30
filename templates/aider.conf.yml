@@ -18,7 +18,9 @@ no-show-release-notes: true
 no-check-update: true
 yes-always: true
 
-auto-test: true
-test-cmd: "bash -c 'compgen -G \"test_*.py\" >/dev/null 2>&1 || exit 0; python -m pytest -x -q'"
+# Auto-test — runs after each edit, before Claude review
+# Enable for simple projects. Disable for projects with external deps.
+# auto-test: true
+# test-cmd: "python -m pytest -x -q"
 
 map-tokens: 1024
