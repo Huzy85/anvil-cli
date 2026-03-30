@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# anvil-plan — extract conversation from aider, send to Claude for detailed planning
+# Run from within aider: /run anvil-plan
+
+set -uo pipefail
+
+HISTORY=".aider.chat.history.md"
+if [ ! -f "$HISTORY" ]; then
+    echo "No conversation history found."
+    echo "Chat with your LLM first, then run: /run anvil-plan"
+    exit 1
+fi
+
+# Extract the conversation — user messages (####) and assistant responses
+# Skip aider metadata lines (starting with >)
+CONVERSATION=$(awk '
+    /^#### / { sub(/^#### /, ""); print "USER: " $0; next }
+    /^> / { next }
+    /^# aider/ { next }
+    { print }
+' "$HISTORY" | tail -200)
+
+if [ -z "$CONVERSATION" ]; then
+    echo "No conversation content found in history."
+    exit 1
+fi
+
+mkdir -p .anvil
+
+echo "Sending conversation to Claude for detailed planning..."
+echo ""
+
+RESULT=$(claude -p "You are a senior software architect. Below is a conversation where a developer brainstormed a project idea with an LLM.
+
+Your job: produce a detailed implementation plan with numbered tasks.
+
+Each task must have:
+- A clear title
+- What files to create or modify
+- Step-by-step instructions (specific enough for a coding agent)
+- Acceptance criteria
+
+If you need clarification before planning, put questions under a QUESTIONS: header at the top. Otherwise go straight to the task list.
+
+Output the plan in markdown. Start each task with ### Task N: Title
+
+---
+
+Conversation:
+${CONVERSATION}" --allowedTools "Read,Grep,Glob" --output-format text --max-turns 5 2>&1)
+
+echo "$RESULT"
+
+echo "$RESULT" > .anvil/plan.md
+echo ""
+echo "────────────────────────────────────"
+echo "Plan saved to .anvil/plan.md"
+
+if echo "$RESULT" | grep -qi "^QUESTIONS:"; then
+    echo ""
+    echo "Claude has questions. Answer them with:"
+    echo "  /run anvil-plan-answers \"your answers here\""
+else
+    echo "Plan ready. Review it, then start building with:"
+    echo "  /run anvil-build"
+fi
