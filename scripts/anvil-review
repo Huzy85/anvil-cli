@@ -44,19 +44,20 @@ echo "  ── Claude Review ─────────────────
 echo "  Files: $FILES"
 echo "  Reviewing..."
 
-PROMPT="Review this code change. Be strict but practical.
+PROMPT="Review this code change in two passes.
 
-REJECT only for:
-- Bugs that will cause runtime errors or wrong results
-- Security vulnerabilities
-- Logic errors
+PASS 1 — Read the diff for obvious bugs:
+- Runtime errors, wrong logic, security issues
+- Wrong mock patch targets (must patch where used, not where defined)
+- Missing function calls (e.g. test sets up data but never calls the method being tested)
 
-DO NOT REJECT for:
-- Style preferences
-- Deprecation warnings
-- Missing type hints
-- Naming conventions
-- Things that work correctly but could be 'better'
+PASS 2 — Read the actual files to double-check:
+- Do the tests actually test what they claim? Trace the logic.
+- Are mock return values consistent with how the code uses them?
+- Would this code actually work if you ran it?
+
+REJECT only for real bugs — things that would cause wrong results or crashes.
+DO NOT REJECT for style, deprecation warnings, naming, or type hints.
 
 If the code works correctly: say APPROVED on its own line.
 If there are real bugs: say REJECTED on its own line, then list ONLY the bugs (one line each, be specific).
@@ -64,8 +65,11 @@ If there are real bugs: say REJECTED on its own line, then list ONLY the bugs (o
 Diff:
 ${DIFF}"
 
+# Allow Claude to read the actual files for pass 2
+ALLOWED_TOOLS="Read,Grep,Glob"
+
 if [[ "$REVIEWER" == "claude -p"* ]]; then
-    RESULT=$(claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format text --max-turns 1 2>&1)
+    RESULT=$(claude -p "$PROMPT" --allowedTools "$ALLOWED_TOOLS" --output-format text --max-turns 3 2>&1)
 elif [[ "$REVIEWER" == "anvil-review-api" ]]; then
     RESULT=$(anvil-review-api $FILES 2>&1)
 elif [[ "$REVIEWER" == "anvil-review-local" ]]; then
