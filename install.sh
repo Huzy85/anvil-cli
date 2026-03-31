@@ -19,7 +19,7 @@ echo ""
 MISSING=0
 
 if command -v aider &>/dev/null; then
-    AIDER_VER=$(aider --version 2>&1 | head -1)
+    AIDER_VER=$( (aider --version 2>&1 || true) | head -1 )
     echo "  ✓ aider ($AIDER_VER)"
 else
     echo "  ✗ aider not found"
@@ -36,7 +36,7 @@ fi
 
 HAS_CLAUDE=0
 if command -v claude &>/dev/null; then
-    CLAUDE_VER=$(claude --version 2>&1 | head -1)
+    CLAUDE_VER=$( (claude --version 2>&1 || true) | head -1 )
     echo "  ✓ Claude Code ($CLAUDE_VER)"
     HAS_CLAUDE=1
 else
@@ -156,7 +156,7 @@ echo ""
 echo "Installing scripts to ${BIN_DIR}/..."
 mkdir -p "$BIN_DIR"
 
-for script in anvil anvil-review anvil-review-api anvil-review-local anvil-plan anvil-plan-answers anvil-build anvil-help; do
+for script in anvil anvil-review anvil-review-api anvil-review-local anvil-plan anvil-plan-answers anvil-build anvil-help anvil-test-suite; do
     if [ -f "${SCRIPT_DIR}/scripts/${script}" ]; then
         cp "${SCRIPT_DIR}/scripts/${script}" "${BIN_DIR}/${script}"
         chmod +x "${BIN_DIR}/${script}"
