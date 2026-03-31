@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# anvil-test-suite — benchmark your coding model across 10 tasks
+# Usage: anvil-test-suite [/path/to/results.md]
+#
+# Requires: aider, anvil-review, a running LLM endpoint
+# Run from outside a Claude Code session, or it will auto-escape the cgroup.
+
+set -uo pipefail
+
+# ── Cgroup escape ───────────────────────────────────────────────────────────
+# claude-code.slice has TasksMax=300 which aider's litellm thread pool hits
+# immediately. Escape the cgroup before doing anything.
+if grep -q "claude-code.slice" /proc/$$/cgroup 2>/dev/null; then
+    exec systemd-run --user --scope -p TasksMax=2000 -p CPUQuota=400% -- bash "$0" "$@"
+fi
+
+# ── Config ──────────────────────────────────────────────────────────────────
+# Load config for model settings
+ANVIL_ENV="${HOME}/.anvil.env"
+[ -f "$ANVIL_ENV" ] && source "$ANVIL_ENV"
+
+TEST_MODEL="${ANVIL_TEST_MODEL:-openai/auto}"
+TEST_API_BASE="${ANVIL_TEST_API_BASE:-http://localhost:8080/v1}"
+TEST_API_KEY="${ANVIL_TEST_API_KEY:-not-needed}"
+
+LOG="${1:-${HOME}/anvil-test-results.md}"
+TOTAL=10
+PASS=0
+FAIL=0
+ERRORS=""
+
+echo "# Anvil Test Results — $(date)" > "$LOG"
+echo "" >> "$LOG"
+
+# ── run_test ────────────────────────────────────────────────────────────────
+# Uses pushd/popd so cd doesn't leak into the parent shell.
+# PASS/FAIL/ERRORS are modified directly (bash functions share parent scope).
+run_test() {
+    local NUM="$1"
+    local NAME="$2"
+    local PROMPT="$3"
+    local WORKDIR="/tmp/anvil-t${NUM}"
+    local LOGFILE="/tmp/anvil-output-${NUM}.log"
+    local PROMPTFILE="/tmp/anvil-prompt-${NUM}.md"
+
+    echo "=== Test $NUM: $NAME ==="
+    echo "### Test $NUM: $NAME" >> "$LOG"
+    echo "" >> "$LOG"
+
+    # Clean slate
+    rm -rf "$WORKDIR"
+    mkdir -p "$WORKDIR"
+    pushd "$WORKDIR" > /dev/null
+
+    # Git init — aider needs a repo
+    git init -q
+    git config user.name "Anvil Test"
+    git config user.email "test@anvil.local"
+    echo "# test project" > README.md
+    git add README.md
+    git commit -q -m "init"
+
+    echo "$PROMPT" > "$PROMPTFILE"
+
+    OPENBLAS_NUM_THREADS=1 timeout 300 aider \
+        --message-file "$PROMPTFILE" \
+        --yes-always \
+        --no-analytics \
+        --no-show-model-warnings \
+        --no-show-release-notes \
+        --no-check-update \
+        --no-browser \
+        --auto-lint \
+        --lint-cmd "python: anvil-review" \
+        --model "$TEST_MODEL" \
+        --openai-api-base "$TEST_API_BASE" \
+        --openai-api-key "$TEST_API_KEY" \
+        > "$LOGFILE" 2>&1
+
+    AIDER_EXIT=$?
+
+    # Capture files before popd
+    FILES=$(find . -name "*.py" -not -path "./.git/*" 2>/dev/null | sort)
+
+    REVIEW_COUNT=$(grep -c "Claude Review" "$LOGFILE" 2>/dev/null || true)
+    APPROVED_COUNT=$(grep -c "APPROVED" "$LOGFILE" 2>/dev/null || true)
+    REJECTED_COUNT=$(grep -c "REJECTED" "$LOGFILE" 2>/dev/null || true)
+    FIX_COUNT=$(grep -c "Claude Fix" "$LOGFILE" 2>/dev/null || true)
+    FIXED_COUNT=$(grep -c "FIXED by Claude" "$LOGFILE" 2>/dev/null || true)
+
+    REVIEW_COUNT="${REVIEW_COUNT:-0}"
+    APPROVED_COUNT="${APPROVED_COUNT:-0}"
+    REJECTED_COUNT="${REJECTED_COUNT:-0}"
+    FIX_COUNT="${FIX_COUNT:-0}"
+    FIXED_COUNT="${FIXED_COUNT:-0}"
+
+    # Run tests while still in workdir
+    TEST_RESULT="no tests"
+    TEST_OUTPUT=""
+    if compgen -G "test_*.py" > /dev/null 2>&1; then
+        TEST_OUTPUT=$(python3 -m pytest -x -q 2>&1)
+        TEST_EXIT=$?
+        TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+    fi
+
+    popd > /dev/null
+
+    # ── Write log entry ──────────────────────────────────────────────────
+    echo "- Files: $(echo "$FILES" | tr '\n' ' ')" >> "$LOG"
+    echo "- Aider exit: $AIDER_EXIT" >> "$LOG"
+    echo "- Reviews: $REVIEW_COUNT (approved: $APPROVED_COUNT, rejected: $REJECTED_COUNT, escalations: $FIX_COUNT, fixed: $FIXED_COUNT)" >> "$LOG"
+    echo "- Tests: $TEST_RESULT" >> "$LOG"
+
+    # ── Classify result ──────────────────────────────────────────────────
+    if [ "$AIDER_EXIT" = "124" ]; then
+        echo "- ERROR: Timed out after 300s" >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  $NUM. $NAME — timeout"
+    elif grep -q "can't start new thread\|RuntimeError" "$LOGFILE" 2>/dev/null && [ -z "$FILES" ]; then
+        echo "- ERROR: Thread limit hit — run outside claude-code.slice" >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  $NUM. $NAME — thread exhaustion"
+    elif [ "$TEST_RESULT" = "FAIL" ]; then
+        echo "- Test output:" >> "$LOG"
+        echo '```' >> "$LOG"
+        echo "$TEST_OUTPUT" | tail -20 >> "$LOG"
+        echo '```' >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  $NUM. $NAME — tests failed"
+    elif [ "$REVIEW_COUNT" = "0" ]; then
+        echo "- WARNING: No review ran" >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  $NUM. $NAME — no review"
+    else
+        PASS=$((PASS + 1))
+    fi
+
+    if [ "$REJECTED_COUNT" != "0" ]; then
+        echo "- Rejection details:" >> "$LOG"
+        echo '```' >> "$LOG"
+        grep -A5 "REJECTED" "$LOGFILE" | head -30 >> "$LOG"
+        echo '```' >> "$LOG"
+    fi
+
+    echo "" >> "$LOG"
+    echo "  Reviews: $REVIEW_COUNT | Approved: $APPROVED_COUNT | Rejected: $REJECTED_COUNT | Escalations: $FIX_COUNT | Fixed: $FIXED_COUNT | Tests: $TEST_RESULT"
+    echo ""
+}
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+
+run_test 1 "Thread-safe TaskQueue" \
+"Create taskqueue.py with a thread-safe TaskQueue class using threading.Lock. Methods: submit(fn, *args, **kwargs) adds callable to queue, run_all() executes all and returns list of results, clear() empties queue. If a task raises, catch it as TaskError(task_index, original_exception) in results. run_all() must copy queue and release lock before executing. Also create test_taskqueue.py with pytest tests: normal execution of 3 tasks, exception handling with TaskError, thread safety with 2 threads that submit and then run_all, run_all clears queue. Patch mock at taskqueue.threading.Lock not threading.Lock."
+
+run_test 2 "LRU Cache" \
+"Create lru.py with an LRUCache class. Constructor takes max_size (int). Methods: get(key) returns value or None, put(key, value) adds/updates entry, evicting least recently used if at capacity. Use collections.OrderedDict internally. Also create test_lru.py: test basic get/put, test eviction when full, test that accessing a key makes it most recent, test put updates existing key without eviction."
+
+run_test 3 "Retry decorator" \
+"Create retry.py with a retry decorator. Usage: @retry(max_attempts=3, backoff_factor=2, exceptions=(ValueError,)). It retries the function on specified exceptions with exponential backoff (sleep backoff_factor^attempt seconds). After max_attempts, re-raises the last exception. Create test_retry.py: test successful call (no retry), test retry on exception then success, test max attempts exceeded re-raises, test only catches specified exceptions. Mock time.sleep by patching retry.time.sleep."
+
+run_test 4 "Event emitter" \
+"Create emitter.py with an EventEmitter class. Methods: on(event, callback) registers a listener, off(event, callback) removes it, emit(event, *args, **kwargs) calls all listeners for that event. If a listener raises, catch it, store in a list, continue calling remaining listeners, then return the list of errors. Create test_emitter.py: test on and emit, test off removes listener, test emit with no listeners returns empty list, test listener exception is caught and returned, test multiple listeners called in order."
+
+run_test 5 "CSV parser" \
+"Create csvparser.py with a parse_csv(text) function that takes a CSV string and returns a list of dicts. First line is headers. Handle: quoted fields with commas inside, escaped quotes (doubled), empty fields as empty string, trailing newlines. Create test_csvparser.py: test simple 2-row CSV, test quoted field with comma, test escaped quotes, test empty fields, test single row (headers only returns empty list)."
+
+run_test 6 "Rate limiter" \
+"Create ratelimit.py with a RateLimiter class. Constructor takes max_calls (int) and period_seconds (float). Method allow() returns True if under limit, False if exceeded. Uses a sliding window — tracks timestamps of calls, removes expired ones. Create test_ratelimit.py: test under limit returns True, test at limit returns False, test expired calls free up slots. Mock time.time by patching ratelimit.time.time to control timestamps."
+
+run_test 7 "State machine" \
+"Create statemachine.py with a StateMachine class. Constructor takes initial_state (str). Methods: add_transition(from_state, event, to_state, callback=None), trigger(event) transitions state and calls callback if set, returns new state. Raises InvalidTransition if no matching transition. Property current_state returns current state. Create test_statemachine.py: test initial state, test valid transition, test callback is called with old and new state, test InvalidTransition raised for bad event, test chained transitions."
+
+run_test 8 "JSON validator" \
+"Create validator.py with validate(data, schema) function. Schema is a dict where keys map to types: {'name': str, 'age': int, 'tags': list}. Returns list of error strings. Check: missing required keys, wrong types, extra keys (as warnings prefixed with 'warning:'). Create test_validator.py: test valid data returns empty list, test missing key, test wrong type, test extra key returns warning, test nested validation not needed just top level."
+
+run_test 9 "Promise chain" \
+"Create chain.py with a Chain class for synchronous function chaining. Constructor takes initial value. Methods: then(fn) applies fn to current value and returns self for chaining, catch(fn) sets error handler, result() returns final value or raises if error. If any then() callback raises, skip remaining then() calls and call catch handler. The error handler receives the value at the point of failure, not the exception. If catch is registered after the error has already occurred, call it immediately with the stored value. Create test_chain.py: test simple chain of 2 functions, test error skips remaining then calls (add a no-op .catch() to prevent re-raise), test catch handles error (register catch before the raising then, assert handler received the numeric value not an exception), test result returns final value, test chain without catch re-raises."
+
+run_test 10 "Debounced callback" \
+"Create debounce.py with a debounce(wait_seconds) decorator. The decorated function delays execution — if called again within wait_seconds, the timer resets. Uses threading.Timer internally. Create test_debounce.py: test function is called after wait, test rapid calls only execute once, test different args use latest call's args. Mock time by patching threading.Timer to capture delay and callback."
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+echo "========================================" >> "$LOG"
+echo "## Summary" >> "$LOG"
+echo "- Passed: $PASS / $TOTAL" >> "$LOG"
+echo "- Failed: $FAIL / $TOTAL" >> "$LOG"
+if [ -n "$ERRORS" ]; then
+    echo "- Failures:" >> "$LOG"
+    echo -e "$ERRORS" >> "$LOG"
+fi
+
+echo ""
+echo "=========================================="
+echo "  DONE: $PASS passed, $FAIL failed out of $TOTAL"
+echo "  Results: $LOG"
+echo "=========================================="

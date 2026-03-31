@@ -3,7 +3,7 @@
 # Called by aider after every file edit. Exit 0 = approved, non-zero = rejected.
 #
 # Three tiers:
-#   1-2 rejections: Claude reviews, gives feedback, Hercules retries
+#   1-2 rejections: Claude reviews, gives feedback, LLM retries
 #   3rd rejection:  Claude fixes the code directly, then approves
 
 set -uo pipefail
@@ -26,9 +26,20 @@ mkdir -p "$COUNTER_DIR"
 # Create a stable key from the sorted file list
 FILE_KEY=$(echo "$FILES" | tr ' ' '\n' | sort | md5sum | cut -d' ' -f1)
 COUNTER_FILE="${COUNTER_DIR}/${FILE_KEY}"
+TOTAL_FILE="${COUNTER_DIR}/${FILE_KEY}.total"
 
 REJECTION_COUNT=0
 [ -f "$COUNTER_FILE" ] && REJECTION_COUNT=$(cat "$COUNTER_FILE")
+
+TOTAL_REVIEWS=0
+[ -f "$TOTAL_FILE" ] && TOTAL_REVIEWS=$(cat "$TOTAL_FILE")
+echo $((TOTAL_REVIEWS + 1)) > "$TOTAL_FILE"
+
+# Hard cap: after 3 total reviews, always escalate to Claude fix
+MAX_TOTAL="${ANVIL_MAX_TOTAL_REVIEWS:-3}"
+if [ "$TOTAL_REVIEWS" -ge "$MAX_TOTAL" ]; then
+    REJECTION_COUNT=$MAX_RETRIES  # force escalation
+fi
 
 # ── Build diff ─────────────────────────────────────
 DIFF=""
@@ -91,8 +102,8 @@ ${DIFF}"
         echo "  FIXED by Claude"
         echo "  ────────────────────────────────────────────"
         echo ""
-        # Reset counter
-        rm -f "$COUNTER_FILE"
+        # Reset counters
+        rm -f "$COUNTER_FILE" "$TOTAL_FILE"
         exit 0
     fi
 fi
@@ -145,8 +156,8 @@ if echo "$RESULT" | grep -qi "APPROVED"; then
     echo "  APPROVED"
     echo "  ────────────────────────────────────────────"
     echo ""
-    # Reset counter on approval
-    rm -f "$COUNTER_FILE"
+    # Reset counters on approval
+    rm -f "$COUNTER_FILE" "$TOTAL_FILE"
     exit 0
 else
     # Increment rejection counter

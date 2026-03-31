@@ -145,7 +145,7 @@ def build_with_message_file(overview, tasks):
         print(f"[Task {task['id']}/{total}] {task['title']}")
         print(f"{'=' * 60}\n")
 
-        # Build context for Hercules
+        # Build context for the coding LLM
         context = build_context(overview, tasks, task["id"], completed)
 
         # Build context file for Claude's review
