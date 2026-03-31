@@ -24,7 +24,7 @@ TEST_API_BASE="${ANVIL_TEST_API_BASE:-http://localhost:8080/v1}"
 TEST_API_KEY="${ANVIL_TEST_API_KEY:-not-needed}"
 
 LOG="${1:-${HOME}/anvil-test-results.md}"
-TOTAL=10
+TOTAL=14
 PASS=0
 FAIL=0
 ERRORS=""
@@ -72,6 +72,10 @@ run_test() {
         --no-browser \
         --auto-lint \
         --lint-cmd "python: anvil-review" \
+        --lint-cmd "javascript: anvil-review" \
+        --lint-cmd "typescript: anvil-review" \
+        --lint-cmd "go: anvil-review" \
+        --lint-cmd "rust: anvil-review" \
         --model "$TEST_MODEL" \
         --openai-api-base "$TEST_API_BASE" \
         --openai-api-key "$TEST_API_KEY" \
@@ -80,7 +84,7 @@ run_test() {
     AIDER_EXIT=$?
 
     # Capture files before popd
-    FILES=$(find . -name "*.py" -not -path "./.git/*" 2>/dev/null | sort)
+    FILES=$(find . \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" \) -not -path "./.git/*" -not -path "./target/*" 2>/dev/null | sort)
 
     REVIEW_COUNT=$(grep -c "Claude Review" "$LOGFILE" 2>/dev/null || true)
     APPROVED_COUNT=$(grep -c "APPROVED" "$LOGFILE" 2>/dev/null || true)
@@ -99,6 +103,23 @@ run_test() {
     TEST_OUTPUT=""
     if compgen -G "test_*.py" > /dev/null 2>&1; then
         TEST_OUTPUT=$(python3 -m pytest -x -q 2>&1)
+        TEST_EXIT=$?
+        TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+    elif compgen -G "*.test.js" > /dev/null 2>&1; then
+        TEST_OUTPUT=$(node *.test.js 2>&1)
+        TEST_EXIT=$?
+        TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+    elif compgen -G "*.test.ts" > /dev/null 2>&1; then
+        TEST_OUTPUT=$(npx tsc --strict *.ts 2>&1 && node *.test.js 2>&1)
+        TEST_EXIT=$?
+        TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+    elif compgen -G "*_test.go" > /dev/null 2>&1; then
+        [ ! -f "go.mod" ] && go mod init testmod 2>/dev/null
+        TEST_OUTPUT=$(go test -v 2>&1)
+        TEST_EXIT=$?
+        TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+    elif [ -f "Cargo.toml" ]; then
+        TEST_OUTPUT=$(cargo test 2>&1)
         TEST_EXIT=$?
         TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
     fi
@@ -178,6 +199,18 @@ run_test 9 "Promise chain" \
 
 run_test 10 "Debounced callback" \
 "Create debounce.py with a debounce(wait_seconds) decorator. The decorated function delays execution — if called again within wait_seconds, the timer resets. Uses threading.Timer internally. Create test_debounce.py: test function is called after wait, test rapid calls only execute once, test different args use latest call's args. Mock time by patching threading.Timer to capture delay and callback."
+
+run_test 11 "JavaScript — Event Bus" \
+"Create eventbus.js with an EventBus class (ES6 module). Methods: on(event, handler), off(event, handler), emit(event, ...args). Handlers are called in registration order. If a handler throws, catch it, continue calling remaining handlers, return array of errors from emit(). Export default. Also create eventbus.test.js using Node's built-in assert module (not jest/mocha): test on+emit calls handler, test off removes handler, test emit with error returns error array, test emit with no handlers returns empty array. Run with: node eventbus.test.js (process.exit(1) on any assertion failure)."
+
+run_test 12 "TypeScript — Stack with generics" \
+"Create stack.ts with a generic Stack<T> class. Methods: push(item: T), pop(): T | undefined, peek(): T | undefined, size(): number, isEmpty(): boolean. Use a private array internally. Export the class. Also create stack.test.ts — import Stack, test push+pop returns items in LIFO order, test pop on empty returns undefined, test peek doesn't remove, test size. Use console.assert and process.exit(1) on failure. Compile with: npx tsc --strict stack.ts stack.test.ts && node stack.test.js"
+
+run_test 13 "Go — Ring Buffer" \
+"Create ringbuffer.go in package main with a RingBuffer struct. Constructor NewRingBuffer(capacity int). Methods: Push(val int), Pop() (int, bool), Len() int, IsFull() bool. Use a fixed-size slice with head/tail pointers. Also create ringbuffer_test.go with Go testing package: TestPushPop, TestPopEmpty, TestOverflow (push beyond capacity overwrites oldest), TestLen. Run with: go test -v"
+
+run_test 14 "Rust — Simple HashMap" \
+"Create src/lib.rs with a SimpleMap<K, V> struct using Vec<(K, V)> internally (no std HashMap). Implement: new(), insert(key, value), get(&key) -> Option<&V>, remove(&key) -> Option<V>, len(). K must be PartialEq. Add #[cfg(test)] mod tests with: test_insert_and_get, test_remove, test_get_missing_returns_none, test_len. Create Cargo.toml with package name 'simplemap'. Run with: cargo test"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo "========================================" >> "$LOG"
