@@ -111,13 +111,15 @@ echo ""
 echo "Reviewer (checks code after each edit):"
 echo ""
 if [ "$HAS_CLAUDE" -eq 1 ]; then
-    echo "  1. Claude Code CLI (subscription — recommended)"
+    echo "  1. Claude Code CLI (recommended — full support)"
 else
     echo "  1. Claude Code CLI (not installed — install first)"
 fi
-echo "  2. OpenAI-compatible API"
-echo "  3. Local LLM"
-echo "  4. None (skip review)"
+echo "  2. Gemini CLI (experimental — no auto-fix escalation)"
+echo "  3. OpenAI Codex CLI (experimental)"
+echo "  4. OpenAI-compatible API"
+echo "  5. Local LLM"
+echo "  6. None (skip review)"
 echo ""
 read -rp "Choice [1]: " REVIEWER_CHOICE
 REVIEWER_CHOICE="${REVIEWER_CHOICE:-1}"
@@ -128,6 +130,18 @@ REVIEWER_EXTRA=""
 case "$REVIEWER_CHOICE" in
     1) REVIEWER_CMD="claude -p" ;;
     2)
+        if ! command -v gemini &>/dev/null; then
+            echo "  ⚠ gemini not found. Install: npm i -g @google/gemini-cli"
+        fi
+        REVIEWER_CMD="gemini -p"
+        ;;
+    3)
+        if ! command -v codex &>/dev/null; then
+            echo "  ⚠ codex not found. Install: npm i -g @openai/codex"
+        fi
+        REVIEWER_CMD="codex exec"
+        ;;
+    4)
         read -rp "Reviewer API URL [https://api.openai.com/v1]: " R_URL
         R_URL="${R_URL:-https://api.openai.com/v1}"
         read -rp "Reviewer model [gpt-4o]: " R_MODEL
@@ -138,7 +152,7 @@ case "$REVIEWER_CHOICE" in
 ANVIL_REVIEWER_MODEL=\"${R_MODEL}\"
 ANVIL_REVIEWER_API_KEY=\"${R_KEY}\""
         ;;
-    3)
+    5)
         read -rp "Reviewer LLM URL [http://localhost:11434/v1]: " R_URL
         R_URL="${R_URL:-http://localhost:11434/v1}"
         read -rp "Reviewer model [auto]: " R_MODEL
@@ -147,7 +161,7 @@ ANVIL_REVIEWER_API_KEY=\"${R_KEY}\""
         REVIEWER_EXTRA="ANVIL_REVIEWER_URL=\"${R_URL}\"
 ANVIL_REVIEWER_MODEL=\"${R_MODEL}\""
         ;;
-    4) REVIEWER_CMD="true" ;;
+    6) REVIEWER_CMD="true" ;;
     *) echo "Invalid choice"; exit 1 ;;
 esac
 

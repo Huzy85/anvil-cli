@@ -110,8 +110,14 @@ Two config files, both written by the installer:
 Edit `~/.anvil.env` to switch reviewers without reinstalling:
 
 ```bash
-# Claude Code CLI (subscription, recommended)
+# Claude Code CLI (recommended — full support)
 ANVIL_REVIEWER="claude -p"
+
+# Gemini CLI (experimental — see limitations below)
+ANVIL_REVIEWER="gemini -p"
+
+# OpenAI Codex CLI (experimental — see limitations below)
+ANVIL_REVIEWER="codex exec"
 
 # Or use an API
 ANVIL_REVIEWER="anvil-review-api"
@@ -124,6 +130,23 @@ ANVIL_REVIEWER="anvil-review-local"
 ANVIL_REVIEWER_URL="http://localhost:11434/v1"
 ANVIL_REVIEWER_MODEL="auto"
 ```
+
+## Reviewer comparison
+
+Claude Code CLI is the only fully tested reviewer. Gemini and Codex work for basic review but have not been tested end-to-end with Anvil.
+
+| Feature | Claude Code CLI | Gemini CLI | Codex CLI | API / Local LLM |
+|---------|----------------|------------|-----------|-----------------|
+| Code review | Yes | Yes | Yes | Yes |
+| Auto-fix escalation | Yes | No | Untested | No |
+| Tool use in review | Yes | No (headless) | Untested | No |
+| Tested with Anvil | Yes | No | No | Yes (API only) |
+| Install | `npm i -g @anthropic-ai/claude-code` | `npm i -g @google/gemini-cli` | `npm i -g @openai/codex` | N/A |
+
+**Limitations of non-Claude reviewers:**
+- No auto-fix escalation. After max rejections, the build stops and asks you to fix the code manually.
+- Gemini CLI blocks all file tools in headless mode, so it can only review diffs, not read source files for context.
+- Codex CLI escalation support has not been verified. It may work but we haven't tested it.
 
 ## Model flexibility
 
