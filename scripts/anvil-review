@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # anvil-review — aider --lint-cmd hook that sends diffs to a reviewer
 # Called by aider after every file edit. Exit 0 = approved, non-zero = rejected.
+#
+# Three tiers:
+#   1-2 rejections: Claude reviews, gives feedback, Hercules retries
+#   3rd rejection:  Claude fixes the code directly, then approves
 
 set -uo pipefail
 
@@ -9,19 +13,30 @@ ANVIL_ENV="${HOME}/.anvil.env"
 
 REVIEWER="${ANVIL_REVIEWER:-claude -p}"
 MAX_DIFF_CHARS="${ANVIL_MAX_DIFF_CHARS:-40000}"
+MAX_RETRIES="${ANVIL_MAX_RETRIES:-2}"
 
 FILES="$@"
 [ -z "$FILES" ] && exit 0
 
-# Build diff — handle tracked, staged, and new untracked files
+# ── Rejection counter ──────────────────────────────
+# Track per-file rejection count so we know when to escalate
+COUNTER_DIR="/tmp/anvil-review-counts"
+mkdir -p "$COUNTER_DIR"
+
+# Create a stable key from the sorted file list
+FILE_KEY=$(echo "$FILES" | tr ' ' '\n' | sort | md5sum | cut -d' ' -f1)
+COUNTER_FILE="${COUNTER_DIR}/${FILE_KEY}"
+
+REJECTION_COUNT=0
+[ -f "$COUNTER_FILE" ] && REJECTION_COUNT=$(cat "$COUNTER_FILE")
+
+# ── Build diff ─────────────────────────────────────
 DIFF=""
 for f in $FILES; do
     if git ls-files --error-unmatch "$f" &>/dev/null; then
-        # Tracked file — get diff vs HEAD
         FILE_DIFF=$(git diff HEAD -- "$f" 2>/dev/null)
         [ -z "$FILE_DIFF" ] && FILE_DIFF=$(git diff HEAD~1 -- "$f" 2>/dev/null)
     else
-        # New untracked file — show full content as diff
         FILE_DIFF="--- /dev/null
 +++ b/$f
 $(sed 's/^/+/' "$f")"
@@ -39,8 +54,43 @@ if [ "$DIFF_LEN" -gt "$MAX_DIFF_CHARS" ]; then
 [diff truncated — ${DIFF_LEN} chars total, showing first ${MAX_DIFF_CHARS}]"
 fi
 
+# ── Escalation: Claude fixes directly ──────────────
+if [ "$REJECTION_COUNT" -ge "$MAX_RETRIES" ]; then
+    echo ""
+    echo "  ── Claude Fix (escalation after $REJECTION_COUNT rejections) ──"
+    echo "  Files: $FILES"
+    echo "  Claude is fixing the code directly..."
+
+    FIX_PROMPT="The following code has been written by a local LLM and rejected $REJECTION_COUNT times during review. The LLM could not fix it.
+
+Read the files, find the bugs, and fix them directly using the Edit tool. Focus on:
+- Runtime errors and wrong logic
+- Wrong mock patch targets (must patch where imported, not where defined)
+- Tests that don't actually test what they claim
+- Missing function calls, wrong assertions
+
+Fix the code so all tests pass. Be minimal — only fix bugs, don't refactor.
+
+Files to fix: $FILES
+
+Current diff:
+${DIFF}"
+
+    if [[ "$REVIEWER" == "claude -p"* ]]; then
+        FIX_RESULT=$(claude -p "$FIX_PROMPT" --allowedTools "Read,Grep,Glob,Edit,Write,Bash" --output-format text --max-turns 10 2>&1)
+        echo "$FIX_RESULT" | tail -5
+        echo "  FIXED by Claude"
+        echo "  ────────────────────────────────────────────"
+        echo ""
+        # Reset counter
+        rm -f "$COUNTER_FILE"
+        exit 0
+    fi
+fi
+
+# ── Normal review ──────────────────────────────────
 echo ""
-echo "  ── Claude Review ──────────────────────────"
+echo "  ── Claude Review [$((REJECTION_COUNT + 1))/${MAX_RETRIES}] ──────────────"
 echo "  Files: $FILES"
 echo "  Reviewing..."
 
@@ -60,16 +110,17 @@ REJECT only for real bugs — things that would cause wrong results or crashes.
 DO NOT REJECT for style, deprecation warnings, naming, or type hints.
 
 If the code works correctly: say APPROVED on its own line.
-If there are real bugs: say REJECTED on its own line, then list ONLY the bugs (one line each, be specific).
+If there are real bugs: say REJECTED on its own line, then for EACH bug provide:
+- What is wrong (one sentence)
+- The exact fix: show the corrected code the LLM should write
+
+The LLM fixing this code is not very smart. Give it exact code to copy, not descriptions.
 
 Diff:
 ${DIFF}"
 
-# Allow Claude to read the actual files for pass 2
-ALLOWED_TOOLS="Read,Grep,Glob"
-
 if [[ "$REVIEWER" == "claude -p"* ]]; then
-    RESULT=$(claude -p "$PROMPT" --allowedTools "$ALLOWED_TOOLS" --output-format text --max-turns 3 2>&1)
+    RESULT=$(claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format text --max-turns 3 2>&1)
 elif [[ "$REVIEWER" == "anvil-review-api" ]]; then
     RESULT=$(anvil-review-api $FILES 2>&1)
 elif [[ "$REVIEWER" == "anvil-review-local" ]]; then
@@ -82,9 +133,13 @@ if echo "$RESULT" | grep -qi "APPROVED"; then
     echo "  APPROVED"
     echo "  ────────────────────────────────────────────"
     echo ""
+    # Reset counter on approval
+    rm -f "$COUNTER_FILE"
     exit 0
 else
-    echo "  REJECTED"
+    # Increment rejection counter
+    echo $((REJECTION_COUNT + 1)) > "$COUNTER_FILE"
+    echo "  REJECTED ($((REJECTION_COUNT + 1))/${MAX_RETRIES} before escalation)"
     echo ""
     echo "$RESULT"
     echo ""
