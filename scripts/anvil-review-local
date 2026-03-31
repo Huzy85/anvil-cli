@@ -40,11 +40,14 @@ try:
     r = json.load(sys.stdin)
     content = r['choices'][0]['message']['content']
     print(content)
-    sys.exit(0 if 'APPROVED' in content.upper() else 1)
 except Exception as e:
     print(f'Review error: {e}', file=sys.stderr)
     sys.exit(1)
 " 2>&1)
 
 echo "$RESULT"
-exit ${PIPESTATUS[0]:-1}
+if echo "$RESULT" | grep -qi "APPROVED"; then
+    exit 0
+else
+    exit 1
+fi
