@@ -3,17 +3,31 @@
 # Called by aider after every file edit. Exit 0 = approved, non-zero = rejected.
 #
 # Three tiers:
-#   1-2 rejections: Claude reviews, gives feedback, LLM retries
-#   3rd rejection:  Claude fixes the code directly, then approves
+#   1-2 rejections: reviewer checks code, gives feedback, LLM retries
+#   3rd rejection:  if Claude — fixes code directly. Otherwise — stops, tells user.
 
 set -uo pipefail
+
+# Save any env vars set on the command line before sourcing the config file
+_SAVED_REVIEWER="${ANVIL_REVIEWER:-}"
+_SAVED_URL="${ANVIL_REVIEWER_URL:-}"
+_SAVED_MODEL="${ANVIL_REVIEWER_MODEL:-}"
+_SAVED_KEY="${ANVIL_REVIEWER_API_KEY:-}"
 
 ANVIL_ENV="${HOME}/.anvil.env"
 [ -f "$ANVIL_ENV" ] && source "$ANVIL_ENV"
 
+# Command-line env vars override the config file
+[ -n "$_SAVED_REVIEWER" ] && ANVIL_REVIEWER="$_SAVED_REVIEWER"
+[ -n "$_SAVED_URL" ] && ANVIL_REVIEWER_URL="$_SAVED_URL"
+[ -n "$_SAVED_MODEL" ] && ANVIL_REVIEWER_MODEL="$_SAVED_MODEL"
+[ -n "$_SAVED_KEY" ] && ANVIL_REVIEWER_API_KEY="$_SAVED_KEY"
+
 REVIEWER="${ANVIL_REVIEWER:-claude -p}"
 MAX_DIFF_CHARS="${ANVIL_MAX_DIFF_CHARS:-40000}"
 MAX_RETRIES="${ANVIL_MAX_RETRIES:-2}"
+REVIEW_TIMEOUT="${ANVIL_REVIEW_TIMEOUT:-90}"
+ESCALATION_TIMEOUT="${ANVIL_ESCALATION_TIMEOUT:-120}"
 
 FILES="$@"
 [ -z "$FILES" ] && exit 0
@@ -35,7 +49,7 @@ TOTAL_REVIEWS=0
 [ -f "$TOTAL_FILE" ] && TOTAL_REVIEWS=$(cat "$TOTAL_FILE")
 echo $((TOTAL_REVIEWS + 1)) > "$TOTAL_FILE"
 
-# Hard cap: after 3 total reviews, always escalate to Claude fix
+# Hard cap: after MAX_TOTAL total reviews, force escalation
 MAX_TOTAL="${ANVIL_MAX_TOTAL_REVIEWS:-3}"
 if [ "$TOTAL_REVIEWS" -ge "$MAX_TOTAL" ]; then
     REJECTION_COUNT=$MAX_RETRIES  # force escalation
@@ -71,14 +85,42 @@ if [ "$DIFF_LEN" -gt "$MAX_DIFF_CHARS" ]; then
 [diff truncated — ${DIFF_LEN} chars total, showing first ${MAX_DIFF_CHARS}]"
 fi
 
-# ── Escalation: Claude fixes directly ──────────────
+# ── Helper: check if result looks like an error ───
+check_result_error() {
+    local RESULT="$1"
+    local EXIT_CODE="$2"
+    if [ "$EXIT_CODE" -eq 124 ]; then
+        echo "  TIMEOUT: Reviewer did not respond within ${REVIEW_TIMEOUT}s"
+        echo "  Code was NOT reviewed. Check the changes manually."
+        echo "  ────────────────────────────────────────────"
+        exit 1
+    fi
+    if echo "$RESULT" | grep -qi "rate.limit\|overloaded\|529\|503\|too many requests"; then
+        echo "  RATE LIMITED: Reviewer is busy"
+        echo "  Code was NOT reviewed. Check the changes manually."
+        echo "  ────────────────────────────────────────────"
+        exit 1
+    fi
+    if echo "$RESULT" | grep -qi "Review error:\|connection refused\|Connection refused"; then
+        echo "  ERROR: Reviewer is unreachable"
+        echo "  $RESULT"
+        echo "  Code was NOT reviewed. Check the changes manually."
+        echo "  ────────────────────────────────────────────"
+        exit 1
+    fi
+}
+
+# ── Escalation after max retries ──────────────────
 if [ "$REJECTION_COUNT" -ge "$MAX_RETRIES" ]; then
     echo ""
-    echo "  ── Claude Fix (escalation after $REJECTION_COUNT rejections) ──"
+    echo "  ── Escalation (after $REJECTION_COUNT rejections) ──"
     echo "  Files: $FILES"
-    echo "  Claude is fixing the code directly..."
 
-    FIX_PROMPT="The following code has been written by a local LLM and rejected $REJECTION_COUNT times during review. The LLM could not fix it.
+    # Only Claude Code CLI can fix code directly (it has file editing tools)
+    if [[ "$REVIEWER" == "claude -p"* ]]; then
+        echo "  Claude is fixing the code directly..."
+
+        FIX_PROMPT="The following code has been written by a local LLM and rejected $REJECTION_COUNT times during review. The LLM could not fix it.
 ${REVIEW_CONTEXT:+
 Project Context:
 ${REVIEW_CONTEXT}
@@ -96,17 +138,16 @@ Files to fix: $FILES
 Current diff:
 ${DIFF}"
 
-    if [[ "$REVIEWER" == "claude -p"* ]]; then
-        FIX_RESULT=$(timeout 120 claude -p "$FIX_PROMPT" --allowedTools "Read,Grep,Glob,Edit,Write,Bash" --output-format text --max-turns 10 2>&1)
+        FIX_RESULT=$(timeout "$ESCALATION_TIMEOUT" claude -p "$FIX_PROMPT" --allowedTools "Read,Grep,Glob,Edit,Write,Bash" --output-format text --max-turns 10 2>&1)
         FIX_EXIT=$?
         if [ $FIX_EXIT -eq 124 ]; then
-            echo "  TIMEOUT: Claude did not respond within 120s"
-            echo "  Code was NOT reviewed. Check the changes manually."
+            echo "  TIMEOUT: Claude did not respond within ${ESCALATION_TIMEOUT}s"
+            echo "  Code was NOT fixed. Check the changes manually."
             echo "  ────────────────────────────────────────────"
             exit 1
         elif echo "$FIX_RESULT" | grep -qi "rate.limit\|overloaded\|529\|503"; then
             echo "  RATE LIMITED: Claude is busy"
-            echo "  Code was NOT reviewed. Check the changes manually."
+            echo "  Code was NOT fixed. Check the changes manually."
             echo "  ────────────────────────────────────────────"
             exit 1
         fi
@@ -117,12 +158,23 @@ ${DIFF}"
         # Reset counters
         rm -f "$COUNTER_FILE" "$TOTAL_FILE"
         exit 0
+    else
+        # Non-Claude reviewers can't fix code — tell the user
+        echo "  Reviewer rejected this code $REJECTION_COUNT times but cannot fix it directly."
+        echo "  (Only Claude Code CLI supports auto-fix escalation.)"
+        echo ""
+        echo "  Options:"
+        echo "    1. Fix the code manually and retry"
+        echo "    2. Switch to Claude Code CLI: set ANVIL_REVIEWER=\"claude -p\" in ~/.anvil.env"
+        echo "    3. Reset the counter and continue: rm /tmp/anvil-review-counts/${FILE_KEY}*"
+        echo "  ────────────────────────────────────────────"
+        exit 1
     fi
 fi
 
 # ── Normal review ──────────────────────────────────
 echo ""
-echo "  ── Claude Review [$((REJECTION_COUNT + 1))/${MAX_RETRIES}] ──────────────"
+echo "  ── Review [$((REJECTION_COUNT + 1))/${MAX_RETRIES}] ──────────────"
 echo "  Files: $FILES"
 echo "  Reviewing..."
 
@@ -154,21 +206,23 @@ ${REVIEW_CONTEXT}
 Diff:
 ${DIFF}"
 
+# Run the reviewer with timeout protection
 if [[ "$REVIEWER" == "claude -p"* ]]; then
-    RESULT=$(timeout 90 claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format text --max-turns 3 2>&1)
-    if [ $? -eq 124 ]; then
-        echo "  TIMEOUT: Claude review timed out after 90s"
-        echo "  Code was NOT reviewed. Check the changes manually."
-        echo "  ────────────────────────────────────────────"
-        exit 1
-    fi
+    RESULT=$(timeout "$REVIEW_TIMEOUT" claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format text --max-turns 3 2>&1)
+    REVIEWER_EXIT=$?
 elif [[ "$REVIEWER" == "anvil-review-api" ]]; then
-    RESULT=$(anvil-review-api $FILES 2>&1)
+    RESULT=$(timeout "$REVIEW_TIMEOUT" anvil-review-api $FILES 2>&1)
+    REVIEWER_EXIT=$?
 elif [[ "$REVIEWER" == "anvil-review-local" ]]; then
-    RESULT=$(anvil-review-local $FILES 2>&1)
+    RESULT=$(timeout "$REVIEW_TIMEOUT" anvil-review-local $FILES 2>&1)
+    REVIEWER_EXIT=$?
 else
-    RESULT=$($REVIEWER $FILES 2>&1)
+    RESULT=$(timeout "$REVIEW_TIMEOUT" $REVIEWER $FILES 2>&1)
+    REVIEWER_EXIT=$?
 fi
+
+# Check for timeout, rate-limit, or connection errors
+check_result_error "$RESULT" "$REVIEWER_EXIT"
 
 if echo "$RESULT" | grep -qi "APPROVED"; then
     echo "  APPROVED"
