@@ -29,6 +29,7 @@ Here's what happens when you use it:
 3. Claude reads that rough plan and turns it into a clean, structured task list
 4. The cheaper model writes the code, one task at a time
 5. Claude checks each piece before it goes in — if something's wrong, it asks the coding model to fix it
+6. If the coding model still can't fix it after two attempts, Claude steps in and fixes it directly — nothing gets left broken
 
 The result: a 4-component project that would normally use ~8,000 Claude tokens uses ~5,800 instead. About 30% cheaper, with the same quality checks.
 
