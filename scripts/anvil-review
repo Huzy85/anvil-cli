@@ -28,6 +28,7 @@ MAX_DIFF_CHARS="${ANVIL_MAX_DIFF_CHARS:-40000}"
 MAX_RETRIES="${ANVIL_MAX_RETRIES:-2}"
 REVIEW_TIMEOUT="${ANVIL_REVIEW_TIMEOUT:-90}"
 ESCALATION_TIMEOUT="${ANVIL_ESCALATION_TIMEOUT:-120}"
+REVIEW_MAX_TURNS="${ANVIL_REVIEW_MAX_TURNS:-6}"
 
 # ── Usage tracking ─────────────────────────────────
 USAGE_LOG="${ANVIL_USAGE_LOG:-.anvil/usage.log}"
@@ -81,6 +82,13 @@ done
 
 [ -z "$DIFF" ] && exit 0
 
+# ── Compress diff before sending ───────────────────
+# Strip ANSI escape codes, collapse runs of blank lines, remove trailing whitespace
+DIFF=$(printf '%b' "$DIFF" \
+    | sed 's/\x1b\[[0-9;]*m//g' \
+    | sed 's/[[:space:]]*$//' \
+    | cat -s)
+
 # ── Load project context if available ─────────────
 REVIEW_CONTEXT=""
 if [ -f ".anvil/review-context.md" ]; then
@@ -104,6 +112,13 @@ check_result_error() {
         echo "  Code was NOT reviewed. Check the changes manually."
         echo "  ────────────────────────────────────────────"
         log_usage "review" "${#PROMPT}" "timeout"
+        exit 1
+    fi
+    if echo "$RESULT" | grep -qi "Reached max turns"; then
+        echo "  WARNING: Reviewer hit turn limit without concluding — review incomplete"
+        echo "  Code was NOT reviewed. Check the changes manually."
+        echo "  ────────────────────────────────────────────"
+        log_usage "review" "$PROMPT_TOKENS" "max_turns"
         exit 1
     fi
     if echo "$RESULT" | grep -qi "rate.limit\|overloaded\|529\|503\|too many requests"; then
@@ -223,9 +238,12 @@ ${REVIEW_CONTEXT}
 Diff:
 ${DIFF}"
 
+# Estimate tokens in prompt (4 chars ≈ 1 token)
+PROMPT_TOKENS=$(( (${#PROMPT} + 3) / 4 ))
+
 # Run the reviewer with timeout protection
 if [[ "$REVIEWER" == "claude -p"* ]]; then
-    RESULT=$(timeout "$REVIEW_TIMEOUT" claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format text --max-turns 3 2>&1)
+    RESULT=$(timeout "$REVIEW_TIMEOUT" claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format text --max-turns "$REVIEW_MAX_TURNS" 2>&1)
     REVIEWER_EXIT=$?
 elif [[ "$REVIEWER" == "anvil-review-api" ]]; then
     RESULT=$(timeout "$REVIEW_TIMEOUT" anvil-review-api $FILES 2>&1)
@@ -242,22 +260,22 @@ fi
 check_result_error "$RESULT" "$REVIEWER_EXIT"
 
 if echo "$RESULT" | grep -qi "APPROVED"; then
-    echo "  APPROVED"
+    echo "  APPROVED (~${PROMPT_TOKENS} tokens)"
     echo "  ────────────────────────────────────────────"
     echo ""
-    log_usage "review" "${#PROMPT}" "approved"
+    log_usage "review" "$PROMPT_TOKENS" "approved"
     # Reset counters on approval
     rm -f "$COUNTER_FILE" "$TOTAL_FILE"
     exit 0
 else
     # Increment rejection counter
     echo $((REJECTION_COUNT + 1)) > "$COUNTER_FILE"
-    echo "  REJECTED ($((REJECTION_COUNT + 1))/${MAX_RETRIES} before escalation)"
+    echo "  REJECTED ($((REJECTION_COUNT + 1))/${MAX_RETRIES} before escalation) (~${PROMPT_TOKENS} tokens)"
     echo ""
     echo "$RESULT"
     echo ""
     echo "  ────────────────────────────────────────────"
     echo ""
-    log_usage "review" "${#PROMPT}" "rejected"
+    log_usage "review" "$PROMPT_TOKENS" "rejected"
     exit 1
 fi
