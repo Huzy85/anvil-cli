@@ -76,8 +76,8 @@ pip install aider-chat
 npm install -g @anthropic-ai/claude-code
 
 # 3. Get Anvil
-git clone https://github.com/Huzy85/anvil-cli
-cd anvil-cli
+git clone https://github.com/Huzy85/anvil
+cd anvil
 ./install.sh
 ```
 

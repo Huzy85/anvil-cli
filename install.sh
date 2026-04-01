@@ -50,7 +50,7 @@ echo ""
 # ── Coder model ─────────────────────────────────────
 echo "Coder model (the LLM that writes code):"
 echo ""
-echo "  1. Local LLM — Ollama"
+echo "  1. Ollama (free, runs on your machine)"
 echo "  2. Local LLM — llama.cpp / LM Studio / vLLM (OpenAI-compatible)"
 echo "  3. API — Deepseek"
 echo "  4. API — OpenRouter"
