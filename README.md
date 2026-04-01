@@ -24,10 +24,11 @@ The "cheaper model" can be a free AI running on your own machine (no internet ne
 
 Here's what happens when you use it:
 
-1. You describe what you want to build in plain English
-2. Claude turns that into a step-by-step plan
-3. The cheaper coding model writes the code, one step at a time
-4. Claude checks each piece before it goes in — if something's wrong, it asks the coding model to fix it
+1. You describe what you want to build in plain English — to the cheaper model, not Claude
+2. The cheaper model has a conversation with you and produces a rough plan
+3. Claude reads that rough plan and turns it into a clean, structured task list
+4. The cheaper model writes the code, one task at a time
+5. Claude checks each piece before it goes in — if something's wrong, it asks the coding model to fix it
 
 The result: a 4-component project that would normally use ~8,000 Claude tokens uses ~5,800 instead. About 30% cheaper, with the same quality checks.
 
@@ -108,8 +109,8 @@ You
 
 Three phases:
 
-1. **Chat** — brainstorm with your coding model via aider
-2. **Plan** — `/run anvil-plan` sends the conversation to Claude for a structured task plan
+1. **Chat** — brainstorm with your coding model via aider; it produces a rough plan from your conversation
+2. **Plan** — `/run anvil-plan` sends that rough plan to Claude, which polishes it into a clean structured task list
 3. **Build** — `/run anvil-build` feeds tasks to aider one by one; Claude reviews each edit automatically
 
 ## Requirements
