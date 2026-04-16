@@ -1,0 +1,15 @@
+# aider runtime artefacts
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v4/
+.aider.llm.history
+
+# anvil runtime state
+.anvil/
+
+# python
+__pycache__/
+*.pyc
+
+# os
+.DS_Store

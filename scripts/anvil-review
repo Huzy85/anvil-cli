@@ -29,6 +29,56 @@ MAX_RETRIES="${ANVIL_MAX_RETRIES:-2}"
 REVIEW_TIMEOUT="${ANVIL_REVIEW_TIMEOUT:-90}"
 ESCALATION_TIMEOUT="${ANVIL_ESCALATION_TIMEOUT:-120}"
 REVIEW_MAX_TURNS="${ANVIL_REVIEW_MAX_TURNS:-6}"
+DIAGNOSTICS_ENABLED="${ANVIL_DIAGNOSTICS:-1}"
+CACHE_ENABLED="${ANVIL_REVIEW_CACHE:-1}"
+
+# ── Static analysis diagnostics ────────────────────
+# Run available linters/type-checkers on changed files. Inject results into
+# the review prompt so Claude has machine-checked errors alongside the diff.
+# Set ANVIL_DIAGNOSTICS=0 to skip.
+get_diagnostics() {
+    local files="$1"
+    local result=""
+    local file tool output
+    [ "$DIAGNOSTICS_ENABLED" = "0" ] && return 0
+    [ -z "$files" ] && return 0
+    for file in $files; do
+        [ -f "$file" ] || continue
+        tool=""
+        output=""
+        case "$file" in
+            *.py)
+                if command -v pyright >/dev/null 2>&1; then
+                    tool="pyright"
+                    output=$(timeout 10 pyright "$file" 2>&1 | grep -v "^$\|0 errors, 0 warnings" | head -50)
+                elif command -v ruff >/dev/null 2>&1; then
+                    tool="ruff"
+                    output=$(timeout 10 ruff check "$file" 2>&1 | grep -v "^All checks passed" | head -50)
+                elif command -v mypy >/dev/null 2>&1; then
+                    tool="mypy"
+                    output=$(timeout 10 mypy --no-color-output "$file" 2>&1 | grep -v "^Success:" | head -50)
+                fi
+                ;;
+            *.ts|*.tsx|*.js|*.jsx)
+                if command -v tsc >/dev/null 2>&1; then
+                    tool="tsc"
+                    output=$(timeout 10 tsc --noEmit --pretty false "$file" 2>&1 | head -50)
+                fi
+                ;;
+            *.go)
+                if command -v go >/dev/null 2>&1; then
+                    tool="go vet"
+                    output=$(timeout 10 go vet "$file" 2>&1 | head -50)
+                fi
+                ;;
+        esac
+        if [ -n "$tool" ] && [ -n "$output" ]; then
+            result="${result}--- $file ($tool) ---"$'\n'
+            result="${result}${output}"$'\n'
+        fi
+    done
+    echo "${result%$'\n'}"
+}
 
 # ── Usage tracking ─────────────────────────────────
 USAGE_LOG="${ANVIL_USAGE_LOG:-.anvil/usage.log}"
@@ -94,6 +144,9 @@ REVIEW_CONTEXT=""
 if [ -f ".anvil/review-context.md" ]; then
     REVIEW_CONTEXT=$(cat ".anvil/review-context.md")
 fi
+
+# ── Run static analysis diagnostics ────────────────
+DIAGNOSTICS=$(get_diagnostics "$FILES")
 
 # Truncate huge diffs
 DIFF_LEN=${#DIFF}
@@ -162,7 +215,10 @@ Read the files, find the bugs, and fix them directly using the Edit tool. Focus 
 Fix the code so all tests pass. Be minimal — only fix bugs, don't refactor.
 
 Files to fix: $FILES
-
+${DIAGNOSTICS:+
+Static Analysis (machine-checked):
+${DIAGNOSTICS}
+}
 Current diff:
 ${DIFF}"
 
@@ -210,36 +266,43 @@ echo "  ── Review [$((REJECTION_COUNT + 1))/${MAX_RETRIES}] ─────�
 echo "  Files: $FILES"
 echo "  Reviewing..."
 
-PROMPT="Review this code change in two passes.
+PROMPT="Review this diff. Read files if needed.
 
-PASS 1 — Read the diff for obvious bugs:
-- Runtime errors, wrong logic, security issues
-- Wrong mock patch targets (must patch where used, not where defined)
-- Missing function calls (e.g. test sets up data but never calls the method being tested)
+REJECT for real bugs: runtime errors, wrong logic, wrong mock patch paths (patch where used, not defined), missing calls, tests that don't test what they claim.
+IGNORE: style, deprecation, naming, type hints.
 
-PASS 2 — Read the actual files to double-check:
-- Do the tests actually test what they claim? Trace the logic.
-- Are mock return values consistent with how the code uses them?
-- Would this code actually work if you ran it?
-
-REJECT only for real bugs — things that would cause wrong results or crashes.
-DO NOT REJECT for style, deprecation warnings, naming, or type hints.
-
-If the code works correctly: say APPROVED on its own line.
-If there are real bugs: say REJECTED on its own line, then for EACH bug provide:
-- What is wrong (one sentence)
-- The exact fix: show the corrected code the LLM should write
-
-The LLM fixing this code is not very smart. Give it exact code to copy, not descriptions.
+Reply APPROVED or REJECTED on its own line.
+For each bug: one-sentence description + exact fix as code (copy-pasteable — the fixer LLM isn't smart).
 ${REVIEW_CONTEXT:+
-Project Context:
+Context:
 ${REVIEW_CONTEXT}
+}${DIAGNOSTICS:+
+Static Analysis (investigate, ignore style noise):
+${DIAGNOSTICS}
 }
 Diff:
 ${DIFF}"
 
 # Estimate tokens in prompt (4 chars ≈ 1 token)
 PROMPT_TOKENS=$(( (${#PROMPT} + 3) / 4 ))
+
+# ── Diff cache ─────────────────────────────────────
+# Hash the prompt (which includes diff + diagnostics + context). If we've
+# already APPROVED this exact prompt before, reuse the verdict — zero Claude
+# call. Set ANVIL_REVIEW_CACHE=0 to disable.
+CACHE_DIR=".anvil/review-cache"
+CACHE_KEY=""
+if [ "$CACHE_ENABLED" = "1" ]; then
+    CACHE_KEY=$(printf '%s' "$PROMPT" | sha256sum | cut -d' ' -f1)
+    if [ -f "${CACHE_DIR}/${CACHE_KEY}" ]; then
+        echo "  APPROVED (cached, 0 tokens)"
+        echo "  ────────────────────────────────────────────"
+        echo ""
+        log_usage "review" "0" "cached"
+        rm -f "$COUNTER_FILE" "$TOTAL_FILE"
+        exit 0
+    fi
+fi
 
 # Run the reviewer with timeout protection
 if [[ "$REVIEWER" == "claude -p"* ]]; then
@@ -259,23 +322,38 @@ fi
 # Check for timeout, rate-limit, or connection errors
 check_result_error "$RESULT" "$REVIEWER_EXIT"
 
-if echo "$RESULT" | grep -qi "APPROVED"; then
+# Determine verdict — parallel mode sets FINAL_VERDICT explicitly,
+# single-pass mode falls back to grepping the result.
+if [ -z "${FINAL_VERDICT:-}" ]; then
+    if echo "$RESULT" | grep -qi "APPROVED"; then
+        FINAL_VERDICT="APPROVED"
+    else
+        FINAL_VERDICT="REJECTED"
+    fi
+fi
+
+if [ "$FINAL_VERDICT" = "APPROVED" ]; then
     echo "  APPROVED (~${PROMPT_TOKENS} tokens)"
     echo "  ────────────────────────────────────────────"
     echo ""
     log_usage "review" "$PROMPT_TOKENS" "approved"
     # Reset counters on approval
     rm -f "$COUNTER_FILE" "$TOTAL_FILE"
+    # Cache the approved prompt hash so future identical diffs skip Claude
+    if [ "$CACHE_ENABLED" = "1" ] && [ -n "$CACHE_KEY" ]; then
+        mkdir -p "$CACHE_DIR"
+        touch "${CACHE_DIR}/${CACHE_KEY}"
+    fi
     exit 0
-else
-    # Increment rejection counter
-    echo $((REJECTION_COUNT + 1)) > "$COUNTER_FILE"
-    echo "  REJECTED ($((REJECTION_COUNT + 1))/${MAX_RETRIES} before escalation) (~${PROMPT_TOKENS} tokens)"
-    echo ""
-    echo "$RESULT"
-    echo ""
-    echo "  ────────────────────────────────────────────"
-    echo ""
-    log_usage "review" "$PROMPT_TOKENS" "rejected"
-    exit 1
 fi
+
+# REJECTED path
+echo $((REJECTION_COUNT + 1)) > "$COUNTER_FILE"
+echo "  REJECTED ($((REJECTION_COUNT + 1))/${MAX_RETRIES} before escalation) (~${PROMPT_TOKENS} tokens)"
+echo ""
+echo "$RESULT"
+echo ""
+echo "  ────────────────────────────────────────────"
+echo ""
+log_usage "review" "$PROMPT_TOKENS" "rejected"
+exit 1

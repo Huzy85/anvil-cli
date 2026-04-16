@@ -23,6 +23,7 @@ case "${1:-}" in
         echo "  /run plan             Send conversation to Claude for a task plan"
         echo "  /run plan-answers     Answer Claude's planning questions"
         echo "  /run build            Auto-feed plan tasks one by one"
+        echo "  /run run [spec.md]    Plan from spec then build (full pipeline)"
         echo "  /run tokens           Show token usage for this project"
         echo "  /run help             This help message"
         echo ""
@@ -43,6 +44,10 @@ case "${1:-}" in
     build)
         shift
         exec anvil-build "$@"
+        ;;
+    run)
+        shift
+        exec anvil-run "$@"
         ;;
     tokens)
         USAGE_LOG="${ANVIL_USAGE_LOG:-.anvil/usage.log}"
@@ -74,6 +79,7 @@ if [[ "$*" != *"--message"* ]] && [[ "$*" != *"--message-file"* ]]; then
     echo "  ─────────────────────────────────────────"
     echo "  /run plan       Claude plans your idea"
     echo "  /run build      Auto-build from plan"
+    echo "  /run run        Plan from spec then build"
     echo "  /run help       All commands"
     echo ""
 fi

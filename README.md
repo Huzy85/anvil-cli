@@ -2,13 +2,15 @@
 
 > v0.1.0 — First public release
 
-**Build software with AI without burning through your subscription.**
+**A two-model pipeline: cheap coder writes, smart auditor checks.**
 
-Anvil uses a cheaper AI model to write your code while a smarter model (like Claude) checks every change before it goes in. You describe what you want, Anvil breaks it into steps, the coding model writes the code, and Claude catches any mistakes. You get the quality of a top-tier AI review without paying for every single line it writes.
+Anvil is an opinionated wrapper around [aider](https://github.com/paul-gauthier/aider). A cheaper AI model writes the code. A smarter model (Claude by default) plans the work and reviews the result. You pick which model plays each role.
 
-The coding model can be anything: a free local model running on your own machine, a cheap API like Deepseek or OpenRouter, or even Claude itself if you prefer. Claude handles the planning and review — the part where quality actually matters. Everything else goes to whichever model costs you least.
+The coder can be a free local model (Ollama, llama.cpp), a cheap cloud API (Deepseek, Kimi, OpenRouter), or Claude itself. The auditor is usually Claude Code CLI using your existing subscription.
 
-It works on top of [aider](https://github.com/paul-gauthier/aider), an open-source coding tool. If you've been vibe coding with Claude or ChatGPT and watching your credits disappear, Anvil keeps your paid model for the work that matters and lets a cheaper model handle the bulk writing.
+**Your savings scale with your coder.** A coder that writes clean, test-passing code means the auditor only needs a quick confirmation, and you pay pennies instead of dollars. A weaker coder still gets the job done — the auditor steps in and fixes what needs fixing — you just save less. Either way, the work ships.
+
+Pick the coder that fits your budget and the job gets done.
 
 ![Anvil install demo](docs/anvil-install.gif)
 
@@ -16,22 +18,18 @@ It works on top of [aider](https://github.com/paul-gauthier/aider), an open-sour
 
 ## What is this, in plain English?
 
-You know how when you use Claude or ChatGPT to write code, it burns through your credits fast? That's because every line of code it writes costs money.
+Using Claude or ChatGPT to write code costs real money because every line it writes is a paid token. Anvil lets a cheaper model do the writing and uses Claude for the parts where quality actually matters: the plan and the final check.
 
-Anvil fixes that. It uses a cheaper AI model to do the actual writing, then only calls Claude to check the work — like having a junior developer write the code and a senior developer review it. You get good quality output without paying for every keystroke.
+Think of it as a junior developer writing code and a senior developer reviewing it. The junior is cheap or free. The senior is paid, but only reads the final result.
 
-The "cheaper model" can be a free AI running on your own machine (no internet needed), a low-cost API like Deepseek or OpenRouter, or Claude Haiku. You pick. Claude just does the reviews.
+Here is what happens when you use it:
 
-Here's what happens when you use it:
+1. You chat with the cheaper model about what you want to build.
+2. The cheaper model (or Claude, your choice) turns the conversation into a numbered task list.
+3. The cheaper model writes each file.
+4. Tests run. If they pass, the auditor takes a quick look and signs off (cheap). If they fail, the auditor reads the code and fixes the bugs (more expensive).
 
-1. You describe what you want to build in plain English — to the cheaper model, not Claude
-2. The cheaper model has a conversation with you and produces a rough plan
-3. Claude reads that rough plan and turns it into a clean, structured task list
-4. The cheaper model writes the code, one task at a time
-5. Claude checks each piece before it goes in — if something's wrong, it asks the coding model to fix it
-6. If the coding model still can't fix it after two attempts, Claude steps in and fixes it directly — nothing gets left broken
-
-The result: a 4-component project that would normally use ~8,000 Claude tokens uses ~5,800 instead. About 30% cheaper, with the same quality checks.
+The cheaper model can be a free local AI, a low-cost API like Deepseek, or Claude Haiku. Pick whichever matches your budget and quality bar.
 
 ---
 
@@ -99,20 +97,27 @@ anvil
 You
  │
  ▼
-┌─────────────────────────────────────┐
-│  Aider (terminal)                   │
-│                                     │
-│  Chat ──► Coding model              │
-│  Plan ──► Claude Code CLI           │
-│  Code ──► Coding model + Claude     │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│  Phase 1 — Plan                         │
+│    anvil-plan                           │
+│    Coder (or auditor) writes task list  │
+│                                         │
+│  Phase 2 — Build                        │
+│    anvil-build                          │
+│    Coder writes each file via aider     │
+│                                         │
+│  Phase 3 — Review (single pass)         │
+│    Tests run automatically              │
+│    Pass: auditor stamps APPROVED (cheap)│
+│    Fail: auditor reads + fixes (costly) │
+└─────────────────────────────────────────┘
 ```
 
 Three phases:
 
-1. **Chat** — brainstorm with your coding model via aider; it produces a rough plan from your conversation
-2. **Plan** — `/run anvil-plan` sends that rough plan to Claude, which polishes it into a clean structured task list
-3. **Build** — `/run anvil-build` feeds tasks to aider one by one; Claude reviews each edit automatically
+1. **Plan** — `anvil-plan` asks the coder for a numbered task list. Falls back to the auditor if the coder stalls.
+2. **Build** — `anvil-build` feeds tasks to aider one at a time. The coder writes full file contents. No per-edit auditor call.
+3. **Review** — one auditor call at the end. Pytest runs first. On green, the auditor returns a cheap APPROVED. On red, the auditor gets the failing output plus the source files and is expected to fix the bugs in place.
 
 ## Requirements
 
@@ -123,12 +128,14 @@ Three phases:
 
 ## What happens during review
 
-When aider edits a file, `anvil-review` runs automatically:
+After the coder has written every file, `anvil-build` runs `pytest -q` once and passes the result to the auditor:
 
-1. **Review 1-2:** Claude reads the diff and the actual files. If the code has real bugs (crashes, wrong logic, security issues), it says REJECTED with exact fixes. Style issues are ignored.
-2. **Review 3 (escalation):** If the coding model can't fix the issues after 2 rejections, Claude takes over and fixes the code directly using file editing tools.
-3. **Timeout/rate-limit:** If Claude is unavailable, the build stops and tells you. You decide whether to continue, retry, or switch to a different reviewer.
-4. **Max turns:** Claude has up to 6 turns per review (configurable via `ANVIL_REVIEW_MAX_TURNS` in `~/.anvil.env`). If it hits the limit without concluding, the review is flagged as incomplete rather than silently approved.
+1. **Tests pass** — the auditor gets only the test output and is asked to reply APPROVED. No file upload, 3 turns max. This is the cheap path (a few cents).
+2. **Tests fail** — the auditor gets the failing output plus every source file and up to 15 turns to fix the bugs directly. This is the expensive path (roughly the cost of a direct session).
+3. **Max turns hit** — the run ends with a warning. Nothing is silently approved.
+4. **Auditor unavailable** — the build stops and tells you. You decide whether to retry or switch auditors.
+
+This design keeps the auditor idle when the coder does its job, which is where the savings come from. When the coder needs help, the auditor is there to finish the work. Either way, the final code passes its tests.
 
 ## Troubleshooting
 
@@ -151,7 +158,7 @@ All go to `~/.local/bin/`:
 | Script | Purpose |
 |--------|---------|
 | `anvil` | Launch aider with your coding model + review config |
-| `anvil-review` | Claude Code reviewer (aider lint hook) |
+| `anvil-review` | Standalone reviewer, usable for ad-hoc file checks |
 | `anvil-review-api` | API reviewer alternative (OpenAI-compatible) |
 | `anvil-review-local` | Local model reviewer alternative |
 | `anvil-plan` | Send aider conversation to Claude for planning |
@@ -175,19 +182,23 @@ Runs 10 tasks (thread-safe queue, LRU cache, retry decorator, event emitter, CSV
 
 If a run is interrupted, use `anvil-test-suite-resume` to continue from the last completed task.
 
-## Token efficiency
+## How much does it save?
 
-Anvil uses significantly fewer tokens than an equivalent direct Claude Code session because each review sends a small, focused context rather than accumulating the full conversation history.
+The answer depends entirely on your coder. Here is a real benchmark: a URL shortener spec (8 files, 29 tests), measured end-to-end with the cost shim tracking every paid call.
 
-Benchmark (LogFlow — 4 components, 4 languages, all tests passing):
+| Coder | Tests pass first try | Anvil cost | Direct Claude |
+|-------|---------------------|------------|---------------|
+| Hercules (Qwen3-Coder-Next, local, free) | No. 4 failing tests. | $0.49 | $0.44 |
+| Same setup if Hercules had passed | Yes | ~$0.02 | $0.44 |
 
-| Approach | Tokens |
-|----------|--------|
-| Anvil (9 incremental reviews) | ~5,800 |
-| Direct Claude Code session (estimated) | ~8,300 |
-| Saving | ~2,500 (~30%) |
+Two things to read here:
 
-The gap grows with project size. For a 4-file project it is roughly 30%. For larger projects the context bloat compounds harder, so the saving increases.
+1. **The ceiling is high.** If your coder nails the spec, you pay cents for the APPROVED stamp instead of a full session. For this spec that would have been roughly a 95% saving.
+2. **The floor is close to direct.** If the coder misses, the auditor does the fix-up work and you land around parity. You still get working code and you still paid less for the coder phase (free in this case).
+
+The knob to turn is the coder's first-try accuracy. A smarter cloud coder like Deepseek or Kimi pushes more runs into the cheap lane. A free local model works for routine code (CRUD, boilerplate, standard library wrappers) where first-try accuracy is naturally high.
+
+Anvil also scales better than raw Claude on very small tasks — the two-model overhead shows up as a fixed cost, so trivial jobs (single function, toy scripts) are not where this tool shines. It earns its keep on real specs.
 
 ## Configuration
 
@@ -258,13 +269,13 @@ anvil --model openai/different-model
 
 | Activity | Who does it | Paid? |
 |----------|------------|-------|
-| Chatting and brainstorming | Your coding model | Depends on your model choice |
-| Writing code | Your coding model | Depends on your model choice |
-| Fixing rejected code | Your coding model | Depends on your model choice |
-| Planning (once per project) | Claude / Gemini / Codex | Yes |
-| Reviewing each edit | Claude / Gemini / Codex | Yes |
+| Chatting and brainstorming | Coder | Coder rate |
+| Planning (once per project) | Coder first, auditor as fallback | Coder rate, or auditor if coder stalls |
+| Writing every file | Coder | Coder rate |
+| Final review — tests pass | Auditor | Small auditor call (cents) |
+| Final review — tests fail | Auditor | Full auditor call (dollars) |
 
-If you use a free local model or a cheap API for coding, the bulk of the work costs you nothing or very little. You only pay full price for planning and review.
+Pick a free local model and the bulk of the pipeline is free. Pick a cheap API and it is pennies. The auditor is the only place you pay full rate, and only on the fix-up path.
 
 ## What this is not
 

@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# anvil-integration-test — realistic multi-language project built in stages
+#
+# Simulates everyday Anvil use: a user building "LogFlow", a log analysis
+# pipeline across Python, Node.js, and Go. Each stage is a separate aider
+# run in the same directory, just like a real user would work.
+#
+# Stages:
+#   1. log_parser.py    — Python: parse JSON log lines, output structured JSON
+#   2. summarizer.js    — Node.js: read parser output, group by error code
+#   3. reporter.go      — Go: read summary, format human-readable report
+#   4. pipeline.py      — Python: orchestrate all three end-to-end
+#
+# Usage: anvil-integration-test [/path/to/results.md]
+
+set -uo pipefail
+
+# ── Cgroup escape ─────────────────────────────────────────────────────────────
+if grep -q "claude-code.slice" /proc/$$/cgroup 2>/dev/null; then
+    exec systemd-run --user --scope -p TasksMax=2000 -p CPUQuota=400% -- bash "$0" "$@"
+fi
+
+# ── Config ────────────────────────────────────────────────────────────────────
+ANVIL_ENV="${HOME}/.anvil.env"
+[ -f "$ANVIL_ENV" ] && source "$ANVIL_ENV"
+
+TEST_MODEL="${ANVIL_TEST_MODEL:-openai/auto}"
+TEST_API_BASE="${ANVIL_TEST_API_BASE:-http://localhost:8080/v1}"
+TEST_API_KEY="${ANVIL_TEST_API_KEY:-not-needed}"
+
+LOG="${1:-${HOME}/anvil-integration-results.md}"
+WORKDIR="/tmp/anvil-logflow"
+PASS=0
+FAIL=0
+ERRORS=""
+TOTAL=4
+
+echo "# LogFlow Integration Test — $(date)" > "$LOG"
+echo "" >> "$LOG"
+echo "Simulates a user building a multi-language log analysis pipeline in stages." >> "$LOG"
+echo "" >> "$LOG"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+aider_run() {
+    local STAGE="$1"
+    local PROMPT="$2"
+    local LOGFILE="/tmp/anvil-logflow-stage${STAGE}.log"
+    local PROMPTFILE="/tmp/anvil-logflow-prompt${STAGE}.md"
+
+    echo "$PROMPT" > "$PROMPTFILE"
+
+    OPENBLAS_NUM_THREADS=1 timeout 400 aider \
+        --message-file "$PROMPTFILE" \
+        --yes-always \
+        --no-analytics \
+        --no-show-model-warnings \
+        --no-show-release-notes \
+        --no-check-update \
+        --no-browser \
+        --auto-lint \
+        --lint-cmd "python: anvil-review" \
+        --lint-cmd "javascript: anvil-review" \
+        --lint-cmd "go: anvil-review" \
+        --model "$TEST_MODEL" \
+        --openai-api-base "$TEST_API_BASE" \
+        --openai-api-key "$TEST_API_KEY" \
+        < /dev/null > "$LOGFILE" 2>&1
+
+    echo $?
+}
+
+log_stage() {
+    local NUM="$1"
+    local NAME="$2"
+    local AIDER_EXIT="$3"
+    local TEST_RESULT="$4"
+    local TEST_OUTPUT="$5"
+    local LOGFILE="/tmp/anvil-logflow-stage${NUM}.log"
+
+    local REVIEW_COUNT APPROVED_COUNT REJECTED_COUNT
+    REVIEW_COUNT=$(grep -c "Review" "$LOGFILE" 2>/dev/null || true)
+    APPROVED_COUNT=$(grep -c "APPROVED" "$LOGFILE" 2>/dev/null || true)
+    REJECTED_COUNT=$(grep -c "REJECTED" "$LOGFILE" 2>/dev/null || true)
+
+    echo "### Stage $NUM: $NAME" >> "$LOG"
+    echo "" >> "$LOG"
+    echo "- Aider exit: $AIDER_EXIT" >> "$LOG"
+    echo "- Reviews: $REVIEW_COUNT (approved: $APPROVED_COUNT, rejected: $REJECTED_COUNT)" >> "$LOG"
+    echo "- Tests: $TEST_RESULT" >> "$LOG"
+
+    if [ "$AIDER_EXIT" = "124" ] && [ "$TEST_RESULT" != "PASS" ]; then
+        echo "- ERROR: Timed out after 400s" >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  Stage $NUM. $NAME — timeout"
+    elif [ "$TEST_RESULT" = "FAIL" ]; then
+        echo "- Test output:" >> "$LOG"
+        echo '```' >> "$LOG"
+        echo "$TEST_OUTPUT" | tail -20 >> "$LOG"
+        echo '```' >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  Stage $NUM. $NAME — tests failed"
+    elif [ "$REVIEW_COUNT" = "0" ]; then
+        echo "- WARNING: No review ran" >> "$LOG"
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  Stage $NUM. $NAME — no review"
+    else
+        PASS=$((PASS + 1))
+    fi
+
+    if [ "$REJECTED_COUNT" != "0" ]; then
+        echo "- Rejection details:" >> "$LOG"
+        echo '```' >> "$LOG"
+        grep -A5 "REJECTED" "$LOGFILE" | head -30 >> "$LOG"
+        echo '```' >> "$LOG"
+    fi
+
+    echo "" >> "$LOG"
+    echo "  Reviews: $REVIEW_COUNT | Approved: $APPROVED_COUNT | Rejected: $REJECTED_COUNT | Tests: $TEST_RESULT"
+    echo ""
+}
+
+# ── Set up shared project directory ───────────────────────────────────────────
+rm -rf "$WORKDIR"
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+
+git init -q
+git config user.name "Anvil Test"
+git config user.email "test@anvil.local"
+echo "# LogFlow — multi-language log analysis pipeline" > README.md
+git add README.md
+git commit -q -m "init"
+
+# ── Stage 1: Python log parser ────────────────────────────────────────────────
+echo "=== Stage 1: Python — Log Parser ==="
+
+AIDER_EXIT=$(aider_run 1 "Create log_parser.py with a LogParser class.
+
+The class reads a log file where each line is a JSON object with fields:
+  timestamp (string), level (string: ERROR/WARN/INFO), message (string), code (string)
+
+Methods:
+- parse(filepath) — reads the file, skips malformed lines, returns list of log dicts
+- filter(logs, level) — returns only logs matching that level (case-insensitive)
+- to_json(logs, output_path) — writes the list to a JSON file
+
+Also create test_log_parser.py with pytest tests using tmp_path:
+- test_parse_valid: 3 lines, all valid, returns 3 dicts
+- test_parse_skips_malformed: 1 valid + 1 bad JSON line, returns 1 dict
+- test_filter_by_level: 2 ERROR + 1 WARN, filter ERROR returns 2
+- test_filter_case_insensitive: filter 'error' matches 'ERROR'
+- test_to_json: parse then write, re-read file and verify contents
+
+Do not import anything outside the standard library.")
+
+cd "$WORKDIR"
+
+TEST_OUTPUT=$(python3 -m pytest test_log_parser.py -x -q 2>&1)
+TEST_EXIT=$?
+TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+
+log_stage 1 "Python — Log Parser" "$AIDER_EXIT" "$TEST_RESULT" "$TEST_OUTPUT"
+
+# ── Stage 2: Node.js summarizer ───────────────────────────────────────────────
+echo "=== Stage 2: Node.js — Summarizer ==="
+
+AIDER_EXIT=$(aider_run 2 "Create summarizer.js (CommonJS, no npm packages).
+
+It reads a JSON file produced by log_parser.py — an array of objects with fields:
+  timestamp, level, message, code
+
+Export a function summarize(logs) that returns an object where each key is an
+error code and the value is:
+  { count: number, level: string, last_message: string }
+
+If the same code appears multiple times, keep the level from the first occurrence
+and the message from the last occurrence.
+
+Also export readAndSummarize(inputPath) that reads the JSON file and calls summarize().
+
+Create summarizer.test.js using Node's built-in assert module:
+- test empty array returns empty object
+- test single entry returns correct summary
+- test multiple entries same code: count=N, last_message from last entry
+- test multiple different codes returns separate keys
+- process.exit(1) on any failure, log 'All tests passed' on success.
+
+Do not use require() for anything except assert, fs, and path.")
+
+cd "$WORKDIR"
+
+TEST_OUTPUT=$(node summarizer.test.js 2>&1)
+TEST_EXIT=$?
+TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+
+log_stage 2 "Node.js — Summarizer" "$AIDER_EXIT" "$TEST_RESULT" "$TEST_OUTPUT"
+
+# ── Stage 3: Go reporter ──────────────────────────────────────────────────────
+echo "=== Stage 3: Go — Reporter ==="
+
+AIDER_EXIT=$(aider_run 3 "Create reporter.go in package main.
+
+It reads a JSON file produced by summarizer.js — an object where each key is an
+error code and the value is: {count: number, level: string, last_message: string}
+
+Implement:
+- ReadSummary(path string) (map[string]Entry, error)
+  where Entry is a struct with Count int, Level string, LastMessage string
+- FormatReport(summary map[string]Entry) string
+  Returns a formatted text report, one line per code, sorted by code:
+    [LEVEL] CODE — Nx — last_message
+  Example: [ERROR] E001 — 3x — Database connection failed
+- main() reads os.Args[1] as the input path and prints the report to stdout
+
+Create reporter_test.go with Go testing:
+- TestFormatReport_single: one entry, correct output line
+- TestFormatReport_sorted: two entries, output is alphabetically sorted by code
+- TestFormatReport_empty: empty map returns empty string
+- TestReadSummary: write a temp JSON file, read it, verify fields
+
+Run with: go test -v")
+
+cd "$WORKDIR"
+
+[ ! -f "go.mod" ] && go mod init logflow 2>/dev/null
+TEST_OUTPUT=$(go test -v 2>&1)
+TEST_EXIT=$?
+TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+
+log_stage 3 "Go — Reporter" "$AIDER_EXIT" "$TEST_RESULT" "$TEST_OUTPUT"
+
+# ── Stage 4: Python pipeline orchestrator ─────────────────────────────────────
+echo "=== Stage 4: Python — Pipeline Orchestrator ==="
+
+AIDER_EXIT=$(aider_run 4 "Create pipeline.py that orchestrates the full LogFlow pipeline.
+
+The pipeline has three stages, each using the files already in this repo:
+  1. log_parser.py  — parse a raw log file to parsed_logs.json
+  2. summarizer.js  — run with Node.js to summarise parsed_logs.json to summary.json
+  3. reporter.go    — compiled Go binary that reads summary.json and prints the report
+
+Implement run_pipeline(input_log_path) that:
+1. Creates a temp directory for intermediate files
+2. Uses LogParser from log_parser.py to parse and write parsed_logs.json
+3. Runs: node summarizer.js <parsed_logs.json path> <summary.json path>
+   (add a CLI entry point to summarizer.js: if require.main === module, read
+    process.argv[2] as input and process.argv[3] as output, write the result)
+4. Compiles reporter.go with: go build -o reporter reporter.go
+5. Runs: ./reporter <summary.json path> and captures stdout
+6. Returns the report string
+7. Cleans up temp files
+
+Create test_pipeline.py with a pytest integration test:
+- test_full_pipeline: write a sample log file with 5 lines (3 ERROR E001,
+  1 WARN W001, 1 INFO I001), run run_pipeline(), assert the returned report
+  contains 'E001' and '3x'
+
+Note: summarizer.js needs updating to accept CLI args — include those changes.")
+
+cd "$WORKDIR"
+
+TEST_OUTPUT=$(python3 -m pytest test_pipeline.py -x -q 2>&1)
+TEST_EXIT=$?
+TEST_RESULT=$([ $TEST_EXIT -eq 0 ] && echo "PASS" || echo "FAIL")
+
+log_stage 4 "Python — Pipeline Orchestrator" "$AIDER_EXIT" "$TEST_RESULT" "$TEST_OUTPUT"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo "========================================" >> "$LOG"
+echo "## Summary" >> "$LOG"
+echo "- Passed: $PASS / $TOTAL" >> "$LOG"
+echo "- Failed: $FAIL / $TOTAL" >> "$LOG"
+if [ -n "$ERRORS" ]; then
+    echo "- Failures:" >> "$LOG"
+    echo -e "$ERRORS" >> "$LOG"
+fi
+
+echo ""
+echo "=========================================="
+echo "  DONE: $PASS passed, $FAIL failed out of $TOTAL"
+echo "  Results: $LOG"
+echo "=========================================="

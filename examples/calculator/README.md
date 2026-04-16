@@ -15,8 +15,8 @@ git init && git add . && git commit -m "init"
 # Preview the plan
 anvil-build --dry-run
 
-# Build it — your LLM codes, Claude reviews
+# Build it — your coder writes the code, your auditor reviews the result
 anvil-build
 ```
 
-The plan has 2 tasks. Your LLM writes `calculator.py` and `test_calculator.py`. Claude reviews each one.
+The plan has 2 tasks. Your coder writes `calculator.py` and `test_calculator.py`. Once both are written, pytest runs and the auditor looks at the outcome. If the tests pass, the auditor signs off. If not, the auditor fixes the failing code in place.
